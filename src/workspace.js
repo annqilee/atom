@@ -511,9 +511,8 @@ module.exports = class Workspace extends Model {
   //
   // Returns a {Promise} that resolves to the {TextEditor} for the file URI.
   open (uri_, options = {}) {
-    const { searchAllPanes } = options
-    const { split } = options
     const uri = this.project.resolvePath(uri_)
+    const {searchAllPanes, split} = options
 
     if (!atom.config.get('core.allowPendingPaneItems')) {
       options.pending = false
@@ -526,7 +525,7 @@ module.exports = class Workspace extends Model {
     }
 
     let pane
-    if (searchAllPanes) { pane = this.paneContainer.paneForURI(uri) }
+    if (searchAllPanes) { pane = this.paneForURI(uri) }
     if (pane == null) {
       switch (split) {
         case 'left':
@@ -547,7 +546,108 @@ module.exports = class Workspace extends Model {
       }
     }
 
-    return this.openURIInPane(uri, pane, options)
+    let item
+    if (uri != null) {
+      item = pane.itemForURI(uri)
+    }
+    if (item == null) {
+      item = this.createItemForURI(uri, options)
+    }
+
+    return Promise.resolve(item)
+      .then(item => this.openItem(item, Object.assign({pane, uri}, options)))
+  }
+
+  openURIInPane (uri, pane, options = {}) {
+    let item
+    if (uri != null) {
+      item = pane.itemForURI(uri)
+    }
+    if (item == null) {
+      item = this.createItemForURI(uri, options)
+    }
+    return Promise.resolve(item)
+      .then(item => this.openItem(item, Object.assign({pane, uri}, options)))
+  }
+
+  openItem (item, options = {}) {
+    const {pane} = options
+
+    if (item == null) return undefined
+    if (pane.isDestroyed()) return item
+
+    if (!options.pending && (pane.getPendingItem() === item)) {
+      pane.clearPendingItem()
+    }
+
+    const activatePane = options.activatePane != null ? options.activatePane : true
+    const activateItem = options.activateItem != null ? options.activateItem : true
+    this.itemOpened(item)
+    if (activateItem) {
+      pane.activateItem(item, {pending: options.pending})
+    }
+    if (activatePane) {
+      pane.activate()
+    }
+
+    let initialColumn = 0
+    let initialLine = 0
+    if (!Number.isNaN(options.initialLine)) {
+      initialLine = options.initialLine
+    }
+    if (!Number.isNaN(options.initialColumn)) {
+      initialColumn = options.initialColumn
+    }
+    if ((initialLine >= 0) || (initialColumn >= 0)) {
+      if (typeof item.setCursorBufferPosition === 'function') {
+        item.setCursorBufferPosition([initialLine, initialColumn])
+      }
+    }
+
+    const index = pane.getActiveItemIndex()
+    const uri = options.uri == null && typeof item.getURI === 'function' ? item.getURI() : options.uri
+    this.emitter.emit('did-open', {uri, pane, item, index})
+    return item
+  }
+
+  // Returns a {Promise} that resolves to the {TextEditor} (or other item) for the given URI.
+  createItemForURI (uri, options) {
+    if (uri != null) {
+      for (let opener of this.getOpeners()) {
+        const item = opener(uri, options)
+        if (item != null) return Promise.resolve(item)
+      }
+    }
+
+    try {
+      return this.openTextFile(uri, options)
+    } catch (error) {
+      switch (error.code) {
+        case 'CANCELLED':
+          return Promise.resolve()
+        case 'EACCES':
+          this.notificationManager.addWarning(`Permission denied '${error.path}'`)
+          return Promise.resolve()
+        case 'EPERM':
+        case 'EBUSY':
+        case 'ENXIO':
+        case 'EIO':
+        case 'ENOTCONN':
+        case 'UNKNOWN':
+        case 'ECONNRESET':
+        case 'EINVAL':
+        case 'EMFILE':
+        case 'ENOTDIR':
+        case 'EAGAIN':
+          this.notificationManager.addWarning(
+            `Unable to open '${error.path != null ? error.path : uri}'`,
+            {detail: error.message}
+          )
+          return Promise.resolve()
+        default:
+          throw error
+      }
+    }
   }
 
   // Open Atom's license in the active pane.
@@ -594,90 +694,6 @@ module.exports = class Workspace extends Model {
       this.getActivePane().activate()
     }
     return item
-  }
-
-  openURIInPane (uri, pane, options = {}) {
-    const activatePane = options.activatePane != null ? options.activatePane : true
-    const activateItem = options.activateItem != null ? options.activateItem : true
-
-    let item
-    if (uri != null) {
-      item = pane.itemForURI(uri)
-      if (item == null) {
-        for (let opener of this.getOpeners()) {
-          item = opener(uri, options)
-          if (item != null) break
-        }
-      } else if (!options.pending && (pane.getPendingItem() === item)) {
-        pane.clearPendingItem()
-      }
-    }
-
-    try {
-      if (item == null) {
-        item = this.openTextFile(uri, options)
-      }
-    } catch (error) {
-      switch (error.code) {
-        case 'CANCELLED':
-          return Promise.resolve()
-        case 'EACCES':
-          this.notificationManager.addWarning(`Permission denied '${error.path}'`)
-          return Promise.resolve()
-        case 'EPERM':
-        case 'EBUSY':
-        case 'ENXIO':
-        case 'EIO':
-        case 'ENOTCONN':
-        case 'UNKNOWN':
-        case 'ECONNRESET':
-        case 'EINVAL':
-        case 'EMFILE':
-        case 'ENOTDIR':
-        case 'EAGAIN':
-          this.notificationManager.addWarning(
-            `Unable to open '${error.path != null ? error.path : uri}'`,
-            {detail: error.message}
-          )
-          return Promise.resolve()
-        default:
-          throw error
-      }
-    }
-
-    return Promise.resolve(item)
-      .then(item => {
-        let initialColumn
-        if (pane.isDestroyed()) {
-          return item
-        }
-
-        this.itemOpened(item)
-        if (activateItem) {
-          pane.activateItem(item, {pending: options.pending})
-        }
-        if (activatePane) {
-          pane.activate()
-        }
-
-        let initialLine = initialColumn = 0
-        if (!Number.isNaN(options.initialLine)) {
-          initialLine = options.initialLine
-        }
-        if (!Number.isNaN(options.initialColumn)) {
-          initialColumn = options.initialColumn
-        }
-        if ((initialLine >= 0) || (initialColumn >= 0)) {
-          if (typeof item.setCursorBufferPosition === 'function') {
-            item.setCursorBufferPosition([initialLine, initialColumn])
-          }
-        }
-
-        const index = pane.getActiveItemIndex()
-        this.emitter.emit('did-open', {uri, pane, item, index})
-        return item
-      }
-    )
   }
 
   openTextFile (uri, options) {
